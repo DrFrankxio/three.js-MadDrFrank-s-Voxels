@@ -1,0 +1,320 @@
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/simplex-noise@2.4.0/simplex-noise.min.js"></script>
+<script>
+window.onload = () => {
+  // --- Configuración ---
+  const chunkSize = 16;
+  const viewDistanceChunks = 3;
+  const simplex = new SimplexNoise();
+  const seed = Math.floor(Math.random() * 1e5);
+
+  // --- Setup Three.js ---
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  document.body.style.margin = "0";
+  scene.background = new THREE.Color("rgb(0,127,255)");
+  scene.fog = new THREE.Fog("rgb(0,127,255)", 100, 500);
+
+  const light = new THREE.PointLight(0xffffff, 1, 500);
+  scene.add(light);
+
+  camera.position.set(0, 20, 0);
+
+  // --- Input handling ---
+  const keys = {};
+  window.addEventListener('keydown', e => { keys[e.code] = true; });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  // Pointer lock
+  document.body.requestPointerLock = document.body.requestPointerLock || document.body.mozRequestPointerLock;
+  document.exitPointerLock = document.exitPointerLock || document.mozExitPointerLock;
+
+  window.addEventListener('mousedown', () => {
+    if (document.pointerLockElement !== document.body && document.mozPointerLockElement !== document.body) {
+      document.body.requestPointerLock();
+    }
+  });
+
+  let yaw = 0, pitch = 0;
+  window.addEventListener('mousemove', e => {
+    if (document.pointerLockElement === document.body || document.mozPointerLockElement === document.body) {
+      yaw -= 0.002 * e.movementX;
+      pitch = Math.min(Math.max(pitch - 0.002 * e.movementY, -Math.PI / 2), Math.PI / 2);
+    }
+  });
+
+  // --- Chunk management ---
+  const chunkCache = new Map();
+  const chunkMeshes = new Map();
+
+  function getChunkKey(x, y, z) {
+    return `${x},${y},${z}`;
+  }
+
+  function generateChunkData(cx, cy, cz) {
+    const blocks = new Set();
+    for (let x = 0; x < chunkSize; x++) {
+      for (let y = 0; y < chunkSize; y++) {
+        for (let z = 0; z < chunkSize; z++) {
+          const wx = cx * chunkSize + x;
+          const wy = cy * chunkSize + y;
+          const wz = cz * chunkSize + z;
+          if (
+            simplex.noise3D(wx / 25, wy / 25, wz / 25 + seed) < 0.5 &&
+            wy < simplex.noise2D(wx / 25, wz / 25 + seed) * 5 + simplex.noise2D(wx / 125, wz / 125) * 25
+          ) {
+            blocks.add(`${wx},${wy},${wz}`);
+          }
+        }
+      }
+    }
+    return blocks;
+  }
+
+  // Cache texture once globally
+  const textureLoader = new THREE.TextureLoader();
+  const dirtTexture = textureLoader.load("dirt.jpg");
+  dirtTexture.wrapS = THREE.RepeatWrapping;
+  dirtTexture.wrapT = THREE.RepeatWrapping;
+  dirtTexture.magFilter = THREE.NearestFilter;
+
+  function generateChunkMeshFromData(blocks) {
+    const faceDefs = [
+      { dir: [1, 0, 0], verts: [[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5],[0.5,-0.5,0.5]] },
+      { dir: [-1, 0, 0], verts: [[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5],[-0.5,-0.5,-0.5]] },
+      { dir: [0, 1, 0], verts: [[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5]] },
+      { dir: [0, -1, 0], verts: [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5]] },
+      { dir: [0, 0, 1], verts: [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]] },
+      { dir: [0, 0, -1], verts: [[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5]] },
+    ];
+
+    const positions = [];
+    const indices = [];
+    const uvs = [];
+    let indexOffset = 0;
+
+    for (const posStr of blocks) {
+      const [x, y, z] = posStr.split(',').map(Number);
+      for (const { dir, verts } of faceDefs) {
+        const neighborKey = `${x + dir[0]},${y + dir[1]},${z + dir[2]}`;
+        if (!blocks.has(neighborKey)) {
+          verts.forEach(v => positions.push(x + v[0], y + v[1], z + v[2]));
+          uvs.push(0,0, 1,0, 1,1, 0,1);
+          indices.push(
+            indexOffset, indexOffset+1, indexOffset+2,
+            indexOffset, indexOffset+2, indexOffset+3
+          );
+          indexOffset += 4;
+        }
+      }
+    }
+
+    if (positions.length === 0) return null;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+
+    const material = new THREE.MeshStandardMaterial({ map: dirtTexture });
+
+    return new THREE.Mesh(geometry, material);
+  }
+
+  function updateChunks() {
+    const cx = Math.floor(camera.position.x / chunkSize);
+    const cy = Math.floor(camera.position.y / chunkSize);
+    const cz = Math.floor(camera.position.z / chunkSize);
+
+    const needed = new Set();
+
+    for (let x = cx - viewDistanceChunks; x <= cx + viewDistanceChunks; x++) {
+      for (let y = cy - viewDistanceChunks; y <= cy + viewDistanceChunks; y++) {
+        for (let z = cz - viewDistanceChunks; z <= cz + viewDistanceChunks; z++) {
+          const key = getChunkKey(x,y,z);
+          needed.add(key);
+
+          if (!chunkMeshes.has(key)) {
+            if (!chunkCache.has(key)) {
+              chunkCache.set(key, generateChunkData(x,y,z));
+            }
+            const blocks = chunkCache.get(key);
+            const mesh = generateChunkMeshFromData(blocks);
+            if (mesh) {
+              scene.add(mesh);
+              chunkMeshes.set(key, mesh);
+            }
+          }
+        }
+      }
+    }
+
+    for (const key of chunkMeshes.keys()) {
+      if (!needed.has(key)) {
+        const mesh = chunkMeshes.get(key);
+        scene.remove(mesh);
+        mesh.geometry.dispose();
+        mesh.material.dispose();
+        chunkMeshes.delete(key);
+        chunkCache.delete(key); // libera memoria
+      }
+    }
+  }
+
+  // Handle window resize only on resize event
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  function isBlockBelowPlayer() {
+    const px = Math.floor(camera.position.x);
+    const py = Math.floor(camera.position.y) - 2; // justo debajo del jugador
+    const pz = Math.floor(camera.position.z);
+
+    // Encontrar el chunk donde estaría ese bloque
+    const cx = Math.floor(px / chunkSize);
+    const cy = Math.floor(py / chunkSize);
+    const cz = Math.floor(pz / chunkSize);
+    const chunkKey = getChunkKey(cx, cy, cz);
+
+    // Obtener los bloques del chunk
+    const blocks = chunkCache.get(chunkKey);
+    if (!blocks) return false; // No hay data, asumimos que no hay bloque
+
+    // Comprobar si el bloque está presente
+    const blockKey = `${px},${py},${pz}`;
+    return blocks.has(blockKey);
+  }
+
+  // Función helper para comprobar si hay bloque en coordenadas absolutas
+  function isBlockAt(x, y, z) {
+    const cx = Math.floor(x / chunkSize);
+    const cy = Math.floor(y / chunkSize);
+    const cz = Math.floor(z / chunkSize);
+    const chunkKey = getChunkKey(cx, cy, cz);
+
+    const blocks = chunkCache.get(chunkKey);
+    if (!blocks) return false;
+
+    const blockKey = `${x},${y},${z}`;
+    return blocks.has(blockKey);
+  }
+
+  function isBlockPositiveX() {
+    const px = Math.floor(camera.position.x) + 1;
+    const py = Math.floor(camera.position.y);
+    const pz = Math.floor(camera.position.z);
+    return isBlockAt(px, py, pz);
+  }
+
+  function isBlockNegativeX() {
+    const px = Math.floor(camera.position.x) - 1;
+    const py = Math.floor(camera.position.y);
+    const pz = Math.floor(camera.position.z);
+    return isBlockAt(px, py, pz);
+  }
+
+  function isBlockPositiveZ() {
+    const px = Math.floor(camera.position.x);
+    const py = Math.floor(camera.position.y);
+    const pz = Math.floor(camera.position.z) + 1;
+    return isBlockAt(px, py, pz);
+  }
+
+  function isBlockNegativeZ() {
+    const px = Math.floor(camera.position.x);
+    const py = Math.floor(camera.position.y);
+    const pz = Math.floor(camera.position.z) - 1;
+    return isBlockAt(px, py, pz);
+  }
+
+  // --- Animation loop ---
+  lastChunkUpdate = 0;
+  ySpeed=0
+  gravity=-0.02
+  function animate() {
+    requestAnimationFrame(animate);
+
+    camera.position.y+=ySpeed
+
+    const now = performance.now();
+    if (now - lastChunkUpdate > 500) {
+      updateChunks();
+      lastChunkUpdate = now;
+    }
+
+    const speed = 0.2;
+
+    if (keys['KeyW']) {
+      camera.position.x += Math.sin(yaw) * speed;
+      camera.position.z += Math.cos(yaw) * speed;
+    }
+    if (keys['KeyS']) {
+      camera.position.x -= Math.sin(yaw) * speed;
+      camera.position.z -= Math.cos(yaw) * speed;
+    }
+    if (keys['KeyA']) {
+      camera.position.x += Math.cos(yaw) * speed;
+      camera.position.z -= Math.sin(yaw) * speed;
+    }
+    if (keys['KeyD']) {
+      camera.position.x -= Math.cos(yaw) * speed;
+      camera.position.z += Math.sin(yaw) * speed;
+    }
+    /*
+    if (keys['KeyE']) camera.position.y += speed;
+    if (keys['KeyQ']) camera.position.y -= speed;
+    */
+
+    if (keys['KeyE']&&isBlockBelowPlayer()) {
+      ySpeed=0.2
+    }
+
+    while(isBlockPositiveX()){
+      camera.position.x-=0.01
+    }
+    while(isBlockNegativeX()){
+      camera.position.x+=0.01
+    }
+
+    while(isBlockPositiveZ()){
+      camera.position.z-=0.01
+    }
+    while(isBlockNegativeZ()){
+      camera.position.z+=0.01
+    }
+
+
+    while(isBlockBelowPlayer()){
+      camera.position.y+=0.1
+    }
+
+    if(!isBlockBelowPlayer()&&ySpeed>-0.5){
+      ySpeed+=gravity
+    }
+
+    // Clamp pitch just in case (redundant but safe)
+    pitch = Math.min(Math.max(pitch, -Math.PI/2), Math.PI/2);
+
+    // Update light position
+    light.position.copy(camera.position);
+
+    // Update camera look direction
+    const lookX = camera.position.x + Math.sin(yaw) * Math.cos(pitch);
+    const lookY = camera.position.y + Math.sin(pitch);
+    const lookZ = camera.position.z + Math.cos(yaw) * Math.cos(pitch);
+    camera.lookAt(lookX, lookY, lookZ);
+
+    renderer.render(scene, camera);
+  }
+
+  animate();
+};
+</script>
