@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Terreno con Cuevas, Árboles y Sombras</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/simplex-noise@2.4.0/simplex-noise.min.js"></script>
+<script src="https://mrdoob.github.io/stats.js/build/stats.min.js"></script>
+<script>
+window.onload = () => {
+  const stats = new Stats();
+  stats.showPanel(0);
+  document.body.appendChild(stats.dom);
+  function animateStats() {
+    stats.begin();
+    stats.end();
+    requestAnimationFrame(animateStats);
+  }
+  animateStats();
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0088ff);
+  scene.fog = new THREE.Fog(0x0088ff, 80, 200);
+
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 40, 80);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  const loader = new THREE.TextureLoader();
+  const load6 = (files) => files.map(f => {
+    const tex = loader.load(f);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestMipMapNearestFilter;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+  });
+
+  const materials = {
+    dirt: load6(["dirt.jpg", "dirt.jpg", "dirt.jpg", "dirt.jpg", "dirt.jpg", "dirt.jpg"])
+      .map(tex => new THREE.MeshStandardMaterial({ map: tex })),
+    grass: load6(["grass_dirt.jpeg", "grass_dirt.jpeg", "grass.jpeg", "dirt.jpg", "grass_dirt.jpeg", "grass_dirt.jpeg"])
+      .map(tex => new THREE.MeshStandardMaterial({ map: tex })),
+    trunk: load6(["trunk_side.jpg", "trunk_side.jpg", "trunk_top.jpg", "trunk_top.jpg", "trunk_side.jpg", "trunk_side.jpg"])
+      .map(tex => new THREE.MeshStandardMaterial({ map: tex })),
+    leaf: load6(["leaves.jpg", "leaves.jpg", "leaves.jpg", "leaves.jpg", "leaves.jpg", "leaves.jpg"])
+      .map(tex => new THREE.MeshStandardMaterial({ map: tex }))
+  };
+
+  const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
+
+  const blocks = new Map();
+  const size = 256, half = size / 2;
+  const simplex2D = new SimplexNoise();
+  const simplex3D = new SimplexNoise();
+  const caveThreshold = 0.25, caveScale = 0.02;
+
+  // Generar terreno con cuevas
+  for (let x = -half; x < half; x++) {
+    for (let z = -half; z < half; z++) {
+      let h = Math.floor(simplex2D.noise2D(x / 15, z / 15) * 6 + simplex2D.noise2D(x / 225, z / 225) * 36);
+      for (let y = h - 128; y < h; y++) {
+        if (simplex3D.noise3D(x * caveScale, y * caveScale, z * caveScale) < caveThreshold) {
+          blocks.set(`${x},${y},${z}`, 'dirt');
+        }
+      }
+      if (simplex3D.noise3D(x * caveScale, h * caveScale, z * caveScale) < caveThreshold) {
+        blocks.set(`${x},${h},${z}`, 'grass');
+      }
+    }
+  }
+
+  const hasBlock = (x,y,z) => blocks.has(`${x},${y},${z}`);
+  const directions = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  const visibleBlocks = { dirt: [], grass: [], trunk: [], leaf: [] };
+
+  for (const [key, type] of blocks) {
+    const [x,y,z] = key.split(',').map(Number);
+    if (directions.some(([dx,dy,dz]) => !hasBlock(x+dx, y+dy, z+dz))) {
+      visibleBlocks[type].push(new THREE.Vector3(x,y,z));
+    }
+  }
+
+  // Árboles
+  for (const pos of visibleBlocks.grass) {
+    if (Math.random() > 0.02) continue;
+    const {x,y,z} = pos;
+    const h = 4 + Math.floor(Math.random() * 2);
+    for (let i = 1; i <= h; i++) {
+      const ny = y + i;
+      if (!hasBlock(x, ny, z)) {
+        visibleBlocks.trunk.push(new THREE.Vector3(x, ny, z));
+        blocks.set(`${x},${ny},${z}`, 'trunk');
+      }
+    }
+    const topY = y + h;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = 0; dy <= 2; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const lx = x+dx, ly = topY+dy, lz = z+dz;
+          if (!hasBlock(lx, ly, lz)) {
+            visibleBlocks.leaf.push(new THREE.Vector3(lx, ly, lz));
+            blocks.set(`${lx},${ly},${lz}`, 'leaf');
+          }
+        }
+      }
+    }
+  }
+
+  const dummy = new THREE.Object3D();
+  const makeMesh = (geo, mats, list) => {
+    const mesh = new THREE.InstancedMesh(geo, mats, list.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    list.forEach((v, i) => {
+      dummy.position.copy(v);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+  };
+
+  makeMesh(cubeGeo, materials.dirt, visibleBlocks.dirt);
+  makeMesh(cubeGeo, materials.grass, visibleBlocks.grass);
+  makeMesh(cubeGeo, materials.trunk, visibleBlocks.trunk);
+  makeMesh(cubeGeo, materials.leaf, visibleBlocks.leaf);
+
+  // Luces
+  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+  dirLight.position.set(50, 100, 50);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(8192, 8192);
+  dirLight.shadow.camera.left = -10000;
+  dirLight.shadow.camera.right = 10000;
+  dirLight.shadow.camera.top = 10000;
+  dirLight.shadow.camera.bottom = -10000;
+  scene.add(dirLight);
+
+  // Controles tipo FPS
+  let yaw = 0, pitch = 0;
+  const keys = new Set();
+
+  document.body.addEventListener("mousedown", () => {
+    if (document.pointerLockElement !== document.body)
+      document.body.requestPointerLock();
+  });
+
+  window.addEventListener("mousemove", e => {
+    if (document.pointerLockElement === document.body) {
+      yaw -= e.movementX * 0.002;
+      pitch -= e.movementY * 0.002;
+      pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, pitch));
+    }
+  });
+
+  window.addEventListener("keydown", e => keys.add(e.code));
+  window.addEventListener("keyup", e => keys.delete(e.code));
+
+  function updateCamera(dt) {
+    const speed = 20 * dt;
+    const fwd = [Math.sin(yaw), Math.cos(yaw)];
+    const right = [Math.cos(yaw), -Math.sin(yaw)];
+
+    if (keys.has("KeyW")) { camera.position.x += fwd[0]*speed; camera.position.z += fwd[1]*speed; }
+    if (keys.has("KeyS")) { camera.position.x -= fwd[0]*speed; camera.position.z -= fwd[1]*speed; }
+    if (keys.has("KeyA")) { camera.position.x += right[0]*speed; camera.position.z += right[1]*speed; }
+    if (keys.has("KeyD")) { camera.position.x -= right[0]*speed; camera.position.z -= right[1]*speed; }
+    if (keys.has("KeyE")) camera.position.y += speed;
+    if (keys.has("KeyQ")) camera.position.y -= speed;
+
+    const lx = camera.position.x + Math.sin(yaw) * Math.cos(pitch);
+    const ly = camera.position.y + Math.sin(pitch);
+    const lz = camera.position.z + Math.cos(yaw) * Math.cos(pitch);
+    camera.lookAt(lx, ly, lz);
+  }
+
+  let last = performance.now();
+  function animate() {
+    requestAnimationFrame(animate);
+    const now = performance.now();
+    const dt = (now - last) / 1000;
+    last = now;
+    updateCamera(dt);
+    renderer.render(scene, camera);
+  }
+
+  animate();
+};
+</script>
+</body>
+</html>
